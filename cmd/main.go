@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strconv"
@@ -189,7 +190,7 @@ func (p *Parser) consumeArg() (s string, err error) {
 		return string(buf), err
 	}
 
-	for !p.atEnd() && p.current() != ' ' && p.current != '\r' {
+	for !p.atEnd() && p.current() != ' ' && p.current() != '\r' {
 		s += string(p.current())
 		p.advance()
 	}
@@ -258,6 +259,55 @@ func (cmd Command) handle() bool {
 	default:
 		log.Println("Command not supported", cmd.args[0])
 		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
+	}
+
+	return true
+}
+
+func (cmd *Command) quit() bool {
+	if len(cmd.args) != 1 {
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' commannd\r\n"))
+		return true
+	}
+
+	log.Println("Handle QUIT")
+	cmd.conn.Write([]uint8("+OK\r\n"))
+	return false
+}
+
+func (cmd *Command) del() bool {
+	count := 0
+
+	for _, k := range cmd.args[1:] {
+		if _, ok := cache.LoadAndDelete(k); ok {
+			count++
+		}
+	}
+
+	cmd.conn.Write([]uint8(fmt.Sprintf(":%d\r\n", count)))
+
+	return true
+}
+
+func (cmd *Command) get() bool {
+	if len(cmd.args) != 2 {
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
+		return true
+	}
+
+	log.Println("Handle GET")
+
+	val, _ := cache.Load(cmd.args[1])
+	if val != nil {
+		res, _ := val.(string)
+		if strings.HasPrefix(res, "\"") {
+			res, _ = strconv.Unquote(res)
+		}
+		log.Println("Response length", len(res))
+		cmd.conn.Write([]uint8(fmt.Sprintf("$%d\r\n", len(res))))
+		cmd.conn.Write(append([]uint8(res), []uint8("\r\n")...))
+	} else {
+		cmd.conn.Write([]uint8("$-1\r\n"))
 	}
 
 	return true
