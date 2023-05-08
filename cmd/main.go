@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var cache sync.Map
@@ -40,11 +41,11 @@ func startSession(conn net.Conn) {
 		conn.Close()
 	}()
 
-	defer func() {
-		if err := recover(); err != nil {
-			log.Println("Recovering from error", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		log.Println("Recovering from error", err)
+	// 	}
+	// }()
 
 	p := NewParser(conn)
 
@@ -242,6 +243,7 @@ func (p *Parser) respArray() (Command, error) {
 			cmd.args = append(cmd.args, next.args...)
 		}
 	}
+	cmd.conn = p.conn
 	return cmd, nil
 }
 
@@ -253,18 +255,18 @@ func (cmd Command) handle() bool {
 	case "SET":
 		return cmd.set()
 	case "DEL":
-		return cmd.det()
+		return cmd.del()
 	case "QUIT":
 		return cmd.quit()
 	default:
 		log.Println("Command not supported", cmd.args[0])
-		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
+		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "\r\n"))
 	}
 
 	return true
 }
 
-func (cmd *Command) quit() bool {
+func (cmd Command) quit() bool {
 	if len(cmd.args) != 1 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' commannd\r\n"))
 		return true
@@ -275,7 +277,7 @@ func (cmd *Command) quit() bool {
 	return false
 }
 
-func (cmd *Command) del() bool {
+func (cmd Command) del() bool {
 	count := 0
 
 	for _, k := range cmd.args[1:] {
@@ -289,7 +291,7 @@ func (cmd *Command) del() bool {
 	return true
 }
 
-func (cmd *Command) get() bool {
+func (cmd Command) get() bool {
 	if len(cmd.args) != 2 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 		return true
@@ -311,4 +313,71 @@ func (cmd *Command) get() bool {
 	}
 
 	return true
+}
+
+func (cmd Command) set() bool {
+	if len(cmd.args) < 3 || len(cmd.args) > 6 {
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
+		return true
+	}
+
+	log.Println("Handle SET")
+	log.Println("Value length", len(cmd.args[0]))
+
+	if len(cmd.args) > 3 {
+		pos := 3
+		option := strings.ToUpper(cmd.args[pos])
+
+		switch option {
+		case "NX":
+			log.Println("Handle NX")
+			if _, ok := cache.Load(cmd.args[1]); ok {
+				cmd.conn.Write([]uint8("$-1\r\n"))
+				return true
+			}
+
+			pos++
+		case "XX":
+			log.Println("Handle XX")
+			if _, ok := cache.Load(cmd.args[1]); !ok {
+				cmd.conn.Write([]uint8("$-1\r\n"))
+				return true
+			}
+			pos++
+		}
+
+		if len(cmd.args) > pos {
+			if err := cmd.setExpiration(pos); err != nil {
+				cmd.conn.Write([]uint8("-ERR " + err.Error() + "\r\n"))
+				return true
+			}
+		}
+	}
+
+	cache.Store(cmd.args[1], cmd.args[2])
+	cmd.conn.Write([]uint8("+OK\r\n"))
+	return true
+}
+
+func (cmd Command) setExpiration(pos int) error {
+	option := strings.ToUpper(cmd.args[pos])
+	value, _ := strconv.Atoi(cmd.args[pos+1])
+	var duration time.Duration
+
+	switch option {
+	case "EX":
+		duration = time.Second * time.Duration(value)
+	case "PX":
+		duration = time.Millisecond * time.Duration(value)
+	default:
+		return fmt.Errorf("Expiration option is not valid")
+	}
+
+	go func(sleep_duration time.Duration, key string, opt string) {
+		log.Printf("Handling '%s' sleeping for %v\n", opt, sleep_duration)
+		time.Sleep(sleep_duration)
+		cache.Delete(key)
+	}(duration, cmd.args[1], option)
+
+	return nil
 }
