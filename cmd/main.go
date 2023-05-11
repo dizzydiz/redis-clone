@@ -14,14 +14,16 @@ import (
 
 var cache sync.Map
 
+const addr = "0.0.0.0:6379"
+
 func main() {
-	listener, err := net.Listen("tcp", "0.0.0.0:6380")
+	listener, err := net.Listen("tcp", addr)
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Println("Listening on tcp://0.0.0.0:6380")
+	log.Printf("Listening on tcp://%s", addr)
 
 	for {
 		conn, err := listener.Accept()
@@ -246,6 +248,8 @@ func (cmd Command) handle() bool {
 		return cmd.del()
 	case "QUIT":
 		return cmd.quit()
+	case "PING":
+		return cmd.ping()
 	default:
 		log.Println("Command not supported", cmd.args[0])
 		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
@@ -356,4 +360,19 @@ func (cmd Command) setExpiration(pos int) error {
 		cache.Delete(cmd.args[1])
 	}()
 	return nil
+}
+
+func (cmd Command) ping() bool {
+
+	switch len(cmd.args) {
+	case 1:
+		cmd.conn.Write([]uint8("+PONG\r\n"))
+	case 2:
+		cmd.conn.Write([]uint8(fmt.Sprintf("$%d\r\n", len(cmd.args[1]))))
+		cmd.conn.Write([]uint8(fmt.Sprintf("%s\r\n", cmd.args[1])))
+	default:
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
+	}
+
+	return true
 }
