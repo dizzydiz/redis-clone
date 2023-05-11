@@ -196,7 +196,7 @@ func (p *Parser) respArray() (Command, error) {
 	if err != nil {
 		return cmd, err
 	}
-	log.Println("Read Line: ", elementsStr)
+
 	elements, _ := strconv.Atoi(string(elementsStr))
 	log.Println("Elements", elements)
 	for i := 0; i < elements; i++ {
@@ -217,15 +217,12 @@ func (p *Parser) respArray() (Command, error) {
 				return cmd, err
 			}
 			length, _ := strconv.Atoi(string(arg))
-			text := make([]byte, 0)
-			for i := 0; len(text) <= length; i++ {
-				line, err := p.readLine()
-				if err != nil {
-					return cmd, err
-				}
-				text = append(text, line...)
+			line, err := p.readLine()
+			if err != nil {
+				return cmd, err
 			}
-			cmd.args = append(cmd.args, string(text[:length]))
+
+			cmd.args = append(cmd.args, string(line[:length]))
 		case '*':
 			next, err := p.respArray()
 			if err != nil {
