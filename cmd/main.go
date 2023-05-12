@@ -14,7 +14,7 @@ import (
 
 var cache sync.Map
 
-const addr = "0.0.0.0:6379"
+const addr = "0.0.0.0:6380"
 
 func main() {
 	listener, err := net.Listen("tcp", addr)
@@ -250,6 +250,8 @@ func (cmd Command) handle() bool {
 		return cmd.quit()
 	case "PING":
 		return cmd.ping()
+	case "ECHO":
+		return cmd.echo()
 	default:
 		log.Println("Command not supported", cmd.args[0])
 		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
@@ -374,5 +376,15 @@ func (cmd Command) ping() bool {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 	}
 
+	return true
+}
+
+func (cmd Command) echo() bool {
+	if len(cmd.args) != 2 {
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
+		return true
+	}
+
+	cmd.conn.Write([]uint8(fmt.Sprintf("$%d\r\n%s\r\n", len(cmd.args[1]), cmd.args[1])))
 	return true
 }
