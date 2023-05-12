@@ -252,6 +252,8 @@ func (cmd Command) handle() bool {
 		return cmd.ping()
 	case "ECHO":
 		return cmd.echo()
+	case "INCR":
+		return cmd.incr()
 	default:
 		log.Println("Command not supported", cmd.args[0])
 		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
@@ -301,6 +303,36 @@ func (cmd Command) get() bool {
 	} else {
 		cmd.conn.Write([]uint8("$-1\r\n"))
 	}
+	return true
+}
+
+// incr by one if value is integer, returns the result on inc operation
+// if the key is not found, set it to 1
+func (cmd Command) incr() bool {
+	if len(cmd.args) != 2 {
+		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
+		return true
+	}
+
+	val, loaded := cache.LoadOrStore(cmd.args[1], "1")
+
+	if loaded {
+		intValue, err := strconv.Atoi(val.(string))
+
+		if err != nil {
+			cmd.conn.Write([]uint8("-ERR value is not an integer or out of range\r\n"))
+			return true
+		}
+
+		intValue += 1
+		cache.Store(cmd.args[1], strconv.Itoa(intValue))
+		cmd.conn.Write([]uint8(fmt.Sprintf(":%d\r\n", intValue)))
+		return true
+	}
+
+	cache.Store(cmd.args[1], "1")
+	cmd.conn.Write([]uint8(":1\r\n"))
+
 	return true
 }
 
