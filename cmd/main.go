@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -27,28 +31,64 @@ func main() {
 	log.Printf("Listening on tcp://%s", addr)
 
 	commandChn := make(chan Command)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	wg := new(sync.WaitGroup)
 
 	// start server worker - this should also terminate at some point
-	go handleMessage(commandChn)
+	wg.Add(1)
+	go handleMessage(commandChn, ctx, wg)
 
-	for {
-		conn, err := listener.Accept()
-		log.Println("New Connection", conn)
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		log.Println("got Termination")
+		_ = listener.Close()
+		ctxCancel()
+		// should also close all active connections
+	}()
 
-		if err != nil {
-			log.Fatal(err)
+	//run in a go routine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := listener.Accept()
+			log.Println("New Connection", conn)
+
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			handler := NewConnectionHandler(conn)
+			connections = append(connections, handler)
+			wg.Add(1)
+			go handler.handleConnection(commandChn, ctx, wg)
 		}
+	}()
 
-		handler := NewConnectionHandler(conn)
-		connections = append(connections, handler)
-		go handler.handleConnection(commandChn)
-		// go startSession(conn, commandChn)
-	}
+	wg.Wait()
+	log.Println("Termination Server")
 }
 
-func handleMessage(actions chan Command) {
-	for action := range actions {
-		action.handle()
+// Will terminate is ctx is Done, or channel is closed.
+func handleMessage(actions chan Command, ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for {
+		select {
+		case action, ok := <-actions:
+			log.Println("Got Action ", action, " ok ", ok)
+			if !ok {
+				log.Println("no more actions, Exiting")
+				return
+			}
+
+			action.handle()
+		case <-ctx.Done():
+			log.Println("Handle Actions got done msg")
+			return
+		}
 	}
 }
 
@@ -87,23 +127,38 @@ func (c *ConnectionHandler) getFromConnection(requests chan Command) {
 	}
 }
 
-func (c *ConnectionHandler) handleConnection(commandChn chan Command) {
+func (c *ConnectionHandler) handleConnection(commandChn chan Command, ctx context.Context, wg *sync.WaitGroup) {
+	defer func() {
+		log.Println("Exiting HandleConnection")
+		wg.Done()
+	}()
+
 	incoming := make(chan Command)
 
 	go c.getFromConnection(incoming)
-	for request := range incoming {
-		// if quite, do something
-		// should handle done from parent
-		request.GetCommand()
-		if request.cmd == QUIT {
-			request.quit()
+
+	for {
+		select {
+		case request, ok := <-incoming:
+			if !ok {
+				log.Println("no more messages from connection")
+				return
+			}
+
+			request.GetCommand()
+			if request.cmd == QUIT {
+				request.quit()
+				_ = c.conn.Close()
+			} else {
+				commandChn <- request
+			}
+
+		case <-ctx.Done():
+			log.Println("handleConnection Got Done")
 			_ = c.conn.Close()
-		} else {
-			commandChn <- request
+			return
 		}
 	}
-
-	log.Println("Exiting Handle Connection")
 }
 
 func startSession(conn net.Conn, commandChn chan Command) {
