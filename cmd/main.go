@@ -18,12 +18,18 @@ const addr = "0.0.0.0:6380"
 
 func main() {
 	listener, err := net.Listen("tcp", addr)
+	connections := make([]*ConnectionHandler, 0)
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	log.Printf("Listening on tcp://%s", addr)
+
+	commandChn := make(chan Command)
+
+	// start server worker - this should also terminate at some point
+	go handleMessage(commandChn)
 
 	for {
 		conn, err := listener.Accept()
@@ -33,13 +39,74 @@ func main() {
 			log.Fatal(err)
 		}
 
-		go startSession(conn)
+		handler := NewConnectionHandler(conn)
+		connections = append(connections, handler)
+		go handler.handleConnection(commandChn)
+		// go startSession(conn, commandChn)
 	}
 }
 
-// startSession handles the client's session. Parses and executes commands and writes
-// responses back to the client.
-func startSession(conn net.Conn) {
+func handleMessage(actions chan Command) {
+	for action := range actions {
+		action.handle()
+	}
+}
+
+type ConnectionHandler struct {
+	conn net.Conn
+}
+
+func NewConnectionHandler(conn net.Conn) *ConnectionHandler {
+	return &ConnectionHandler{
+		conn: conn,
+	}
+}
+
+func (c *ConnectionHandler) getFromConnection(requests chan Command) {
+	defer func() {
+		log.Println("Closing connection", c.conn)
+		c.conn.Close()
+		log.Println("Closing channel", requests)
+		close(requests)
+	}()
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println("Recovering from error", err)
+		}
+	}()
+	p := NewParser(c.conn)
+	for {
+		cmd, err := p.command()
+		if err != nil {
+			log.Println("Error reading command", err)
+			c.conn.Write([]uint8("-ERR " + err.Error() + "\r\n"))
+			break
+		}
+
+		requests <- cmd
+	}
+}
+
+func (c *ConnectionHandler) handleConnection(commandChn chan Command) {
+	incoming := make(chan Command)
+
+	go c.getFromConnection(incoming)
+	for request := range incoming {
+		// if quite, do something
+		// should handle done from parent
+		request.GetCommand()
+		if request.cmd == QUIT {
+			request.quit()
+			_ = c.conn.Close()
+		} else {
+			commandChn <- request
+		}
+	}
+
+	log.Println("Exiting Handle Connection")
+}
+
+func startSession(conn net.Conn, commandChn chan Command) {
 	defer func() {
 		log.Println("Closing connection", conn)
 		conn.Close()
@@ -53,13 +120,18 @@ func startSession(conn net.Conn) {
 	for {
 		cmd, err := p.command()
 		if err != nil {
-			log.Println("Error", err)
+			log.Println("Error reading command", err)
 			conn.Write([]uint8("-ERR " + err.Error() + "\r\n"))
 			break
 		}
-		if !cmd.handle() {
-			break
-		}
+
+		fmt.Printf("from Loop: %p\n", &cmd)
+		// temp - send command to action channel
+		commandChn <- cmd
+
+		// if !cmd.handle() {
+		// 	break
+		// }
 	}
 }
 
@@ -72,9 +144,33 @@ type Parser struct {
 	pos  int
 }
 
+type CmdType int64
+
+const (
+	UNKNOWN CmdType = iota
+	ECHO
+	QUIT
+	GET
+	SET
+	INCR
+	DEL
+	PING
+)
+
+var cmdMap = map[string]CmdType{
+	"GET":  GET,
+	"SET":  SET,
+	"DEL":  DEL,
+	"ECHO": ECHO,
+	"QUIT": QUIT,
+	"INCR": INCR,
+	"PING": PING,
+}
+
 type Command struct {
 	args []string
 	conn net.Conn
+	cmd  CmdType
 }
 
 // NewParser returns a new Parser that reads from the given connection.
@@ -237,28 +333,42 @@ func (p *Parser) respArray() (Command, error) {
 	return cmd, nil
 }
 
+func (cmd *Command) GetCommand() CmdType {
+	cmdStr := strings.ToUpper(cmd.args[0])
+
+	cmdType, isFound := cmdMap[cmdStr]
+	if !isFound {
+		cmdType = UNKNOWN
+	}
+
+	cmd.cmd = cmdType
+
+	return cmd.cmd
+}
+
 // handle Executes the command and writes the response. Returns false when the connection should be closed.
-func (cmd Command) handle() bool {
-	switch strings.ToUpper(cmd.args[0]) {
-	case "GET":
+func (cmd *Command) handle() bool {
+	switch cmd.cmd {
+	case GET:
 		return cmd.get()
-	case "SET":
+	case SET:
 		return cmd.set()
-	case "DEL":
+	case DEL:
 		return cmd.del()
-	case "QUIT":
+	case QUIT:
 		return cmd.quit()
-	case "PING":
+	case PING:
 		return cmd.ping()
-	case "ECHO":
+	case ECHO:
 		return cmd.echo()
-	case "INCR":
+	case INCR:
 		return cmd.incr()
-	default:
+	case UNKNOWN:
 		log.Println("Command not supported", cmd.args[0])
 		cmd.conn.Write([]uint8("-ERR unknown command '" + cmd.args[0] + "'\r\n"))
 	}
-	return true
+
+	return false
 }
 
 // quit Used in interactive/inline mode, instructs the server to terminate the connection.
@@ -285,7 +395,7 @@ func (cmd *Command) del() bool {
 }
 
 // get Fetches a key from the cache if exists.
-func (cmd Command) get() bool {
+func (cmd *Command) get() bool {
 	if len(cmd.args) != 2 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 		return true
@@ -308,7 +418,7 @@ func (cmd Command) get() bool {
 
 // incr by one if value is integer, returns the result on inc operation
 // if the key is not found, set it to 1
-func (cmd Command) incr() bool {
+func (cmd *Command) incr() bool {
 	if len(cmd.args) != 2 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 		return true
@@ -337,7 +447,7 @@ func (cmd Command) incr() bool {
 }
 
 // set Stores a key and value on the cache. Optionally sets expiration on the key.
-func (cmd Command) set() bool {
+func (cmd *Command) set() bool {
 	if len(cmd.args) < 3 || len(cmd.args) > 6 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 		return true
@@ -376,7 +486,7 @@ func (cmd Command) set() bool {
 }
 
 // setExpiration Handles expiration when passed as part of the 'set' command.
-func (cmd Command) setExpiration(pos int) error {
+func (cmd *Command) setExpiration(pos int) error {
 	option := strings.ToUpper(cmd.args[pos])
 	value, _ := strconv.Atoi(cmd.args[pos+1])
 	var duration time.Duration
@@ -396,7 +506,7 @@ func (cmd Command) setExpiration(pos int) error {
 	return nil
 }
 
-func (cmd Command) ping() bool {
+func (cmd *Command) ping() bool {
 
 	switch len(cmd.args) {
 	case 1:
@@ -411,7 +521,7 @@ func (cmd Command) ping() bool {
 	return true
 }
 
-func (cmd Command) echo() bool {
+func (cmd *Command) echo() bool {
 	if len(cmd.args) != 2 {
 		cmd.conn.Write([]uint8("-ERR wrong number of arguments for '" + cmd.args[0] + "' command\r\n"))
 		return true
